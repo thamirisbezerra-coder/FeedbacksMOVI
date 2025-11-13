@@ -54,7 +54,7 @@
         <div id="paste-section" class="bg-white p-6 rounded-lg shadow-md mb-8 border border-gray-200">
             <h2 class="text-2xl font-semibold mb-4 text-gray-800">Processar Amostras</h2>
             <p class="text-gray-600 mb-4">Cole os dados da sua planilha (incluindo o cabeçalho) no campo abaixo para
-                carregar os pedidos pendentes do cliente.</p>
+                carregar os pedidos pendentes do cliente. (Seus dados colados ficam salvos no navegador).</p>
             <textarea id="csv-data" rows="8"
                 class="w-full p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-shadow"
                 placeholder="Cole os dados aqui... (Ex: Pedido, Razão Social, Status...)"></textarea>
@@ -102,11 +102,10 @@
 
     </main>
 
-    <!-- MUDANÇA: SDKs do Firebase para o banco de dados -->
+    <!-- SDKs do Firebase para o banco de dados -->
     <script type="module">
         // Importações do Firebase
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        // MUDANÇA: Adicionada importação do Analytics
         import { getAnalytics } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-analytics.js";
         import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, getDoc, setDoc, collection, query, getDocs, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
@@ -120,14 +119,16 @@
 
         // Nome do Cliente Alvo
         const TARGET_CLIENT_NAME = "PERIGE SERVICOS COMERCIAIS LTDA";
+        // Chave para salvar os dados colados no localStorage
+        const PASTED_DATA_KEY = "feedbackApp_pastedData";
 
         // Coleção de feedbacks no Firestore
         let feedbackCollection;
 
-        // MUDANÇA: Inicializa o Firebase
+        // Inicializa o Firebase
         async function initializeFirebase() {
             try {
-                // MUDANÇA: Configuração do Firebase fornecida pelo usuário
+                // Configuração do Firebase fornecida pelo usuário
                 const firebaseConfig = {
                   apiKey: "AIzaSyAjcrlDzQjPXp1VOp6YG6vCgiIEOlDajHo",
                   authDomain: "feedbacksmovi.firebaseapp.com",
@@ -139,19 +140,16 @@
                 };
 
                 const app = initializeApp(firebaseConfig);
-                // MUDANÇA: Inicializa o Analytics
                 const analytics = getAnalytics(app);
                 
                 db = getFirestore(app);
                 auth = getAuth(app);
-                // MUDANÇA: Usa o projectId como o appId para o caminho do DB
-                appId = firebaseConfig.projectId;
+                appId = firebaseConfig.projectId; // Usa o projectId como o appId
 
                 // Habilita persistência offline
                 await enableIndexedDbPersistence(db);
 
-                // MUDANÇA: Como estamos usando um projeto Firebase customizado,
-                // não usamos o custom token do ambiente. Logamos anonimamente.
+                // Loga anonimamente (corrigido para não usar custom token)
                 await signInAnonymously(auth);
 
                 userId = auth.currentUser.uid;
@@ -163,7 +161,7 @@
                 isAuthReady = true;
                 console.log("Firebase inicializado e autenticado anonimamente.");
                 
-                // MUDANÇA: Habilita o botão de processar
+                // Habilita o botão de processar
                 const processButton = document.getElementById('process-button');
                 const buttonText = document.getElementById('button-text');
                 processButton.disabled = false;
@@ -174,6 +172,14 @@
                 const buttonText = document.getElementById('button-text');
                 buttonText.textContent = "Erro ao Conectar";
                 alert("Erro grave ao conectar com o servidor de dados. Verifique sua conexão e tente recarregar a página.");
+            }
+        }
+
+        // MUDANÇA: Carrega os dados colados do localStorage
+        function loadPastedData() {
+            const savedData = localStorage.getItem(PASTED_DATA_KEY);
+            if (savedData) {
+                document.getElementById('csv-data').value = savedData;
             }
         }
 
@@ -370,6 +376,9 @@
             const data = document.getElementById('csv-data').value;
             if (!data) return;
 
+            // MUDANÇA: Salva os dados colados no localStorage
+            localStorage.setItem(PASTED_DATA_KEY, data);
+
             // Esconde a seção de colar dados
             document.getElementById('paste-section').style.display = 'none';
 
@@ -420,7 +429,8 @@
                                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Produto</th>
                                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">NF / Emissão</th>
                                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Feedback</th>
-                                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Observação</th>
+                                                <!-- MUDANÇA: Coluna de observação mais larga -->
+                                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" style="min-width: 250px;">Observação</th>
                                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ação</th>
                                             </tr>
                                         </thead>
@@ -475,7 +485,8 @@
                                         </select>
                                     </td>
                                     <td class="px-4 py-4">
-                                        <textarea class="observation-text w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500" rows="2" placeholder="Observação obrigatória..." ${saved ? 'disabled' : ''}>${saved ? saved.observation : ''}</textarea>
+                                        <!-- MUDANÇA: Aumentado para 3 linhas -->
+                                        <textarea class="observation-text w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500" rows="3" placeholder="Observação obrigatória..." ${saved ? 'disabled' : ''}>${saved ? saved.observation : ''}</textarea>
                                     </td>
                                     <td class="px-4 py-4 whitespace-nowrap text-right text-sm font-medium">
                                         <button class="save-button px-4 py-2 rounded-md text-white font-semibold text-sm shadow-sm transition-colors
@@ -547,9 +558,15 @@
                 button.addEventListener('click', () => {
                     const feedbackId = button.dataset.feedbackId;
                     const orderId = button.dataset.orderId;
+                    
                     // Encontra o item original (necessário para o resumo)
                     const [parsedOrderId, productCode] = feedbackId.split('-');
-                    const itemData = { 'Pedido': parsedOrderId, 'Produto': productCode, 'Descrição': button.closest('tr').querySelector('.text-sm.font-medium').textContent }; // Simplificado
+                    const itemData = { 
+                        'Pedido': parsedOrderId, 
+                        'Produto': productCode, 
+                        // Pega a descrição correta da célula
+                        'Descrição': button.closest('tr').querySelector('.text-sm.font-medium').textContent 
+                    }; 
                     
                     toggleSaveEdit(button, feedbackId, orderId, itemData);
                 });
@@ -557,9 +574,12 @@
         }
 
         // --- INICIALIZAÇÃO ---
-
-        // Chama a inicialização do Firebase
-        initializeFirebase();
+        
+        // Adiciona o listener ao DOMContentLoaded para carregar os dados salvos e inicializar o Firebase
+        document.addEventListener('DOMContentLoaded', (event) => {
+            loadPastedData(); // Carrega os dados colados do localStorage
+            initializeFirebase(); // Inicializa o Firebase
+        });
 
         // Adiciona o listener ao botão de processar
         document.getElementById('process-button').addEventListener('click', handlePastedData);
@@ -569,6 +589,3 @@
 
 </html>
 
-</body>
-
-</html>
