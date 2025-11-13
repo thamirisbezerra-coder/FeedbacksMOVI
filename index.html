@@ -25,7 +25,7 @@
     </style>
 </head>
 
-<body class="bg-gray-50 font-sans antialiased">
+<body class="bg-gray-50 font-sans antialiased flex flex-col min-h-screen">
 
     <!-- Cabeçalho -->
     <header class="bg-gradient-to-r from-blue-800 to-blue-900 text-white p-6 shadow-md">
@@ -35,7 +35,7 @@
         </div>
     </header>
 
-    <main class="container mx-auto max-w-6xl p-4 md:p-8">
+    <main class="container mx-auto max-w-6xl p-4 md:p-8 flex-grow">
 
         <!-- Seção de Instruções (Visível para o Cliente) -->
         <div id="instructions" class="bg-blue-50 border-l-4 border-blue-500 text-blue-800 p-4 rounded-md shadow-sm mb-6"
@@ -51,8 +51,9 @@
         </div>
 
         <!-- Seção para Colar os Dados (Visível apenas para Doremus/MOVI) -->
+        <!-- MUDANÇA: Agora controlada pelo 'appMode' -->
         <div id="paste-section" class="bg-white p-6 rounded-lg shadow-md mb-8 border border-gray-200">
-            <h2 class="text-2xl font-semibold mb-4 text-gray-800">Processar Amostras</h2>
+            <h2 class="text-2xl font-semibold mb-4 text-gray-800">Processar Amostras (Modo Admin)</h2>
             <p class="text-gray-600 mb-4">Cole os dados da sua planilha (incluindo o cabeçalho) no campo abaixo para
                 carregar os pedidos pendentes do cliente. (Seus dados colados ficam salvos no navegador).</p>
             <textarea id="csv-data" rows="8"
@@ -102,6 +103,14 @@
 
     </main>
 
+    <!-- Rodapé com link Admin -->
+    <footer class="bg-gray-100 text-center p-4 mt-8 border-t border-gray-200">
+        <p class="text-sm text-gray-500">&copy; 2025 Doremus & MOVI Ingredientes. Todos os direitos reservados.</p>
+        <!-- MUDANÇA: Link para Admin -->
+        <a href="#" id="admin-link" class="text-xs text-gray-400 hover:text-blue-600">Admin: Iniciar Nova Sessão</a>
+    </footer>
+
+
     <!-- SDKs do Firebase para o banco de dados -->
     <script type="module">
         // Importações do Firebase
@@ -119,8 +128,11 @@
 
         // Nome do Cliente Alvo
         const TARGET_CLIENT_NAME = "PERIGE SERVICOS COMERCIAIS LTDA";
-        // Chave para salvar os dados colados no localStorage
-        const PASTED_DATA_KEY = "feedbackApp_pastedData";
+        
+        // MUDANÇA: Chaves do localStorage para o modo de sessão
+        const SESSION_MODE_KEY = "feedbackApp_appMode"; // 'admin' ou 'client'
+        const PASTED_DATA_KEY = "feedbackApp_pastedData"; // Dados colados
+        const ADMIN_PASSWORD = "movi2025"; // Senha para resetar
 
         // Coleção de feedbacks no Firestore
         let feedbackCollection;
@@ -175,7 +187,53 @@
             }
         }
 
-        // MUDANÇA: Carrega os dados colados do localStorage
+        // MUDANÇA: Gerencia o modo da aplicação (Admin vs Cliente)
+        function manageAppMode() {
+            const appMode = localStorage.getItem(SESSION_MODE_KEY);
+            const pasteSection = document.getElementById('paste-section');
+            const ordersContainer = document.getElementById('orders-container');
+            const instructions = document.getElementById('instructions');
+
+            if (appMode === 'client') {
+                // Modo Cliente: Esconde a caixa de colar, mostra o container de pedidos
+                pasteSection.style.display = 'none';
+                ordersContainer.style.display = 'block';
+                instructions.style.display = 'block'; // Garante que as instruções estejam visíveis
+                
+                // Processa os dados salvos
+                if (isAuthReady) {
+                    processPastedData(true); // Processa dados do localStorage
+                } else {
+                    // Se o Firebase não estiver pronto, espera e tenta de novo
+                    setTimeout(() => processPastedData(true), 1000);
+                }
+            } else {
+                // Modo Admin (padrão): Mostra a caixa de colar
+                pasteSection.style.display = 'block';
+                ordersContainer.style.display = 'none'; // Esconde o container de pedidos
+                instructions.style.display = 'none'; // Esconde instruções do cliente
+                loadPastedData(); // Carrega dados colados anteriores na caixa
+            }
+        }
+        
+        // MUDANÇA: Link de admin para resetar a sessão
+        function setupAdminLink() {
+            document.getElementById('admin-link').addEventListener('click', (e) => {
+                e.preventDefault();
+                const pass = prompt("Digite a senha de administrador para iniciar uma nova sessão (isso limpará os dados colados e o modo cliente):");
+                if (pass === ADMIN_PASSWORD) {
+                    localStorage.removeItem(SESSION_MODE_KEY);
+                    localStorage.removeItem(PASTED_DATA_KEY);
+                    alert("Modo Admin ativado. A página será recarregada.");
+                    window.location.reload();
+                } else if (pass) {
+                    alert("Senha incorreta.");
+                }
+            });
+        }
+
+
+        // Carrega os dados colados do localStorage (para a caixa de texto)
         function loadPastedData() {
             const savedData = localStorage.getItem(PASTED_DATA_KEY);
             if (savedData) {
@@ -365,21 +423,34 @@
             };
         }
 
-        // Função principal para processar os dados colados
-        async function handlePastedData() {
+        // MUDANÇA: Função principal para processar os dados colados
+        // Recebe 'fromStorage' para saber se deve ler do localStorage ou da caixa de texto
+        async function processPastedData(fromStorage = false) {
             // Verifica se o servidor de dados está pronto
             if (!isAuthReady) {
                 alert("O servidor de dados ainda não está pronto. Por favor, aguarde alguns segundos e tente novamente.");
                 return;
             }
 
-            const data = document.getElementById('csv-data').value;
-            if (!data) return;
+            // Decide de onde pegar os dados
+            const data = fromStorage 
+                ? localStorage.getItem(PASTED_DATA_KEY) 
+                : document.getElementById('csv-data').value;
+                
+            if (!data) {
+                if (fromStorage) console.log("Modo cliente, mas sem dados salvos no localStorage.");
+                return;
+            }
+            
+            // Se não veio do storage (veio do clique no botão), salva
+            if (!fromStorage) {
+                localStorage.setItem(PASTED_DATA_KEY, data);
+                // MUDANÇA: Muda para o modo cliente
+                localStorage.setItem(SESSION_MODE_KEY, 'client');
+                manageAppMode(); // Re-renderiza a UI no modo cliente
+            }
 
-            // MUDANÇA: Salva os dados colados no localStorage
-            localStorage.setItem(PASTED_DATA_KEY, data);
-
-            // Esconde a seção de colar dados
+            // Esconde a seção de colar dados (já feito no manageAppMode, mas para garantir)
             document.getElementById('paste-section').style.display = 'none';
 
             // Busca os feedbacks já salvos no DB
@@ -429,7 +500,6 @@
                                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Produto</th>
                                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">NF / Emissão</th>
                                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Feedback</th>
-                                                <!-- MUDANÇA: Coluna de observação mais larga -->
                                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" style="min-width: 250px;">Observação</th>
                                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ação</th>
                                             </tr>
@@ -440,7 +510,8 @@
                         // Cria uma linha da tabela para cada item
                         items.forEach(item => {
                             // Cria um ID único para cada item (Pedido + Produto)
-                            const feedbackId = `${orderId}-${item['Produto']}`;
+                            // Adiciona Razão Social para garantir unicidade caso o produto se repita em clientes diferentes
+                            const feedbackId = `${TARGET_CLIENT_NAME}-${orderId}-${item['Produto']}`;
                             const saved = savedFeedbacks.get(feedbackId);
                             
                             if (!saved) {
@@ -485,7 +556,6 @@
                                         </select>
                                     </td>
                                     <td class="px-4 py-4">
-                                        <!-- MUDANÇA: Aumentado para 3 linhas -->
                                         <textarea class="observation-text w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500" rows="3" placeholder="Observação obrigatória..." ${saved ? 'disabled' : ''}>${saved ? saved.observation : ''}</textarea>
                                     </td>
                                     <td class="px-4 py-4 whitespace-nowrap text-right text-sm font-medium">
@@ -560,12 +630,11 @@
                     const orderId = button.dataset.orderId;
                     
                     // Encontra o item original (necessário para o resumo)
-                    const [parsedOrderId, productCode] = feedbackId.split('-');
+                    const row = button.closest('tr');
                     const itemData = { 
-                        'Pedido': parsedOrderId, 
-                        'Produto': productCode, 
-                        // Pega a descrição correta da célula
-                        'Descrição': button.closest('tr').querySelector('.text-sm.font-medium').textContent 
+                        'Pedido': orderId, 
+                        'Produto': row.querySelector('.text-sm.text-gray-500').textContent.replace('Cód: ', ''), 
+                        'Descrição': row.querySelector('.text-sm.font-medium').textContent 
                     }; 
                     
                     toggleSaveEdit(button, feedbackId, orderId, itemData);
@@ -575,17 +644,19 @@
 
         // --- INICIALIZAÇÃO ---
         
-        // Adiciona o listener ao DOMContentLoaded para carregar os dados salvos e inicializar o Firebase
-        document.addEventListener('DOMContentLoaded', (event) => {
-            loadPastedData(); // Carrega os dados colados do localStorage
-            initializeFirebase(); // Inicializa o Firebase
+        // Adiciona o listener ao DOMContentLoaded
+        document.addEventListener('DOMContentLoaded', async (event) => {
+            setupAdminLink(); // Configura o link de admin no rodapé
+            await initializeFirebase(); // Inicializa o Firebase
+            manageAppMode(); // Decide se mostra o modo Admin ou Cliente
         });
 
         // Adiciona o listener ao botão de processar
-        document.getElementById('process-button').addEventListener('click', handlePastedData);
+        document.getElementById('process-button').addEventListener('click', () => processPastedData(false));
 
     </script>
 </body>
 
 </html>
+
 
