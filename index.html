@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Portal de Feedback de Amostras</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
+    
+    <!-- MUDANÇA: SDKs do Firebase para o banco de dados -->
+    <script type="module">
+        // Importações do Firebase
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, query, getDocs, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Variáveis globais do Firebase
+        let db, auth, userId, appId, isAuthReady = false;
+
+        // Nome do cliente-alvo
+        const TARGET_CLIENT_NAME = "PERIGE SERVICOS COMERCIAIS LTDA";
+        const DEFAULT_FEEDBACK_FILTER = "AMOSTRA SEM FEEDBACK";
+
+        // Cache global para os dados (agora armazena o estado do feedback)
+        let groupedOrdersCache = {};
+
+        // Opções de feedback
+        const FEEDBACK_OPTIONS = {
+            "Pendência": ["AMOSTRA SEM FEEDBACK", "EM ANÁLISE", "AMOSTRA NÃO TESTADA"],
+            "Aprovados": ["APROVADO SEM PEDIDO", "COM PEDIDO"],
+            "Reprovados": [
+                "FORA DO PERFIL DO CLIENTE", "APRESENTACAO PRO ATIVA", "SEM RETORNO DO CLIENTE",
+                "REPRESENTACAO / DISTRIBUIDOR", "PRODUTO DESCONTINUADO",
+                "FORA DA ESPECIFICACAO DO CLIENTE", "QUANTIDADE INSUFICIENTE"
+            ],
+            "Outros": ["EXTRAVIADA", "EXPORTACAO", "EVENTO"]
+        };
+
+        function generateFeedbackOptionsHTML() {
+            let html = '';
+            for (const groupLabel in FEEDBACK_OPTIONS) {
+                html += `<optgroup label="${groupLabel}">`;
+                FEEDBACK_OPTIONS[groupLabel].forEach(option => {
+                    const isSelected = (option.toUpperCase() === DEFAULT_FEEDBACK_FILTER) ? "selected" : ""; 
+                    html += `<option value="${option}" ${isSelected}>${option}</option>`;
+                });
+                html += `</optgroup>`;
+            }
+            return html;
+        }
+        
+        function showToast(message, type = 'error') {
+            const toast = document.getElementById('toast-notification');
+            const messageEl = document.getElementById('toast-message');
+            if (!toast || !messageEl) return;
+            messageEl.textContent = message;
+            toast.classList.remove('bg-red-600', 'bg-green-600');
+            toast.classList.add(type === 'success' ? 'bg-green-600' : 'bg-red-600');
+            toast.classList.remove('opacity-0');
+            setTimeout(() => { toast.classList.add('opacity-0'); }, 3000);
+        }
+
+        // MUDANÇA: Inicializa o Firebase
+        async function initializeFirebase() {
+            try {
+                // Estas variáveis (config, token, app_id) são injetadas pelo ambiente.
+                const firebaseConfig = JSON.parse(__firebase_config);
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+                // Habilita persistência offline
+                await enableIndexedDbPersistence(db);
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        console.log("Firebase conectado. User:", userId);
+                    } else {
+                        isAuthReady = false;
+                        console.log("Firebase desconectado.");
+                    }
+                });
+
+                if (typeof __initial_auth_token !== 'undefined') {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+            } catch (error) {
+                console.error("Erro ao inicializar o Firebase:", error);
+                showToast("Erro crítico: Não foi possível conectar ao servidor.");
+            }
+        }
+
+        // MUDANÇA: Busca feedbacks salvos no banco de dados
+        async function fetchExistingFeedbacks() {
+            if (!isAuthReady) {
+                showToast("Erro: Não foi possível ler os dados salvos.");
+                return new Map();
+            }
+            
+            const feedbacksCollection = collection(db, 'artifacts', appId, 'public', 'data', 'client_feedbacks');
+            const q = query(feedbacksCollection);
+            
+            const feedbackMap = new Map();
+            try {
+                const querySnapshot = await getDocs(q);
+                querySnapshot.forEach((doc) => {
+                    feedbackMap.set(doc.id, doc.data());
+                });
+                return feedbackMap;
+            } catch (error) {
+                console.error("Erro ao buscar feedbacks:", error);
+                showToast("Erro ao carregar dados salvos.");
+                return new Map();
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // Inicializa o Firebase ao carregar a página
+            initializeFirebase();
+
+            const pasteSection = document.getElementById('pasteSection'); 
+            const pasteTextarea = document.getElementById('pasteDataTextarea');
+            const processButton = document.getElementById('processPasteButton');
+            const loadingMessage = document.getElementById('loadingMessage');
+            
+            const feedbackList = document.getElementById('feedback-list');
+            const initialMessage = document.getElementById('initial-message');
+            const noItemsMessage = document.getElementById('no-items-message');
+            
+            const generateSummaryButton = document.getElementById('generateSummaryButton');
+            
+            if (processButton && pasteTextarea && pasteSection) {
+                processButton.addEventListener('click', () => {
+                    handlePasteData(pasteTextarea, loadingMessage, pasteSection, feedbackList, initialMessage, noItemsMessage);
+                });
+            } else {
+                showToast("Erro: Os elementos da página não foram encontrados.");
+            }
+
+            if (generateSummaryButton) {
+                generateSummaryButton.addEventListener('click', handleGenerateSummary);
+            }
+        });
+
+        async function handlePasteData(pasteTextarea, loadingMessage, pasteSection, feedbackList, initialMessage, noItemsMessage) {
+            // MUDANÇA: Verifica se o Firebase está pronto
+            if (!isAuthReady) {
+                showToast("Servidor de dados não está pronto. Aguarde 5s e tente novamente.");
+                return;
+            }
+
+            const pastedText = pasteTextarea.value;
+            if (!pastedText || pastedText.trim() === "") {
+                showToast("Por favor, cole os dados da planilha na área de texto.");
+                pasteTextarea.focus();
+                return;
+            }
+            loadingMessage.classList.remove('hidden');
+            initialMessage.classList.add('hidden'); 
+            feedbackList.innerHTML = ''; 
+            
+            if (typeof Papa === 'undefined') {
+                showToast("Erro crítico: A biblioteca PapaParse não carregou.");
+                loadingMessage.classList.add('hidden');
+                return;
+            }
+
+            Papa.parse(pastedText, {
+                header: true, skipEmptyLines: true, dynamicTyping: true,
+                complete: async function(results) { // MUDANÇA: Função async
+                    loadingMessage.classList.add('hidden');
+                    if (results.errors.length > 0) {
+                        showToast("Erro ao processar os dados. Verifique o formato.");
+                    }
+                    if (!results.data || results.data.length === 0) {
+                        showToast("Nenhum dado válido encontrado no texto colado.");
+                        return;
+                    }
+
+                    pasteSection.classList.add('hidden');
+                    // MUDANÇA: Aguarda o processamento de dados (que agora inclui a busca no DB)
+                    await processData(results.data, feedbackList, noItemsMessage);
+                },
+                error: function(error) {
+                    loadingMessage.classList.add('hidden');
+                    showToast("Erro grave ao ler os dados colados.");
+                }
+            });
+        }
+
+        // MUDANÇA: Função agora é async e busca dados do DB
+        async function processData(data, feedbackList, noItemsMessage) {
+            // Verifica cabeçalhos essenciais
+            if (!data[0] || !data[0]["Razão Social"] || !data[0]["Status"] || !data[0]["Feedback"] || !data[0]["Nota Fiscal"] || !data[0]["Emissão NF"]) {
+                showToast("Erro: Os dados colados não contêm os cabeçalhos esperados (Razão Social, Status, Feedback, Nota Fiscal, Emissão NF).");
+                feedbackList.innerHTML = `<div class="bg-white p-10 rounded-xl shadow-lg text-center text-red-600 border border-red-200">
+                                            <p class="text-lg font-semibold">Falha ao processar os dados.</p>
+                                            <p class="mt-2">Verifique se você copiou a linha de cabeçalho completa da planilha.</p>
+                                          </div>`;
+                return;
+            }
+
+            const pendingItems = data.filter(row =>
+                row["Razão Social"] && row["Razão Social"].trim().toUpperCase() === TARGET_CLIENT_NAME.toUpperCase() &&
+                row["Status"] === "Pendente" &&
+                row["Feedback"] && row["Feedback"].trim().toUpperCase() === DEFAULT_FEEDBACK_FILTER
+            );
+
+            if (pendingItems.length === 0) {
+                noItemsMessage.classList.remove('hidden');
+                return;
+            }
+
+            // MUDANÇA: Busca os feedbacks já salvos no DB
+            const existingFeedbacks = await fetchExistingFeedbacks();
+
+            const groupedByOrder = pendingItems.reduce((acc, item) => {
+                const orderId = item.Pedido || 'Sem Pedido';
+                if (!acc[orderId]) acc[orderId] = [];
+                
+                // MUDANÇA: Verifica se o item já foi salvo no DB
+                const docId = `${orderId}-${item.Produto}`;
+                const existingData = existingFeedbacks.get(docId);
+                
+                if (existingData) {
+                    item.isSaved = true;
+                    item.newFeedback = existingData.newFeedback;
+                    item.newObservacao = existingData.newObservacao;
+                } else {
+                    item.isSaved = false;
+                    item.newFeedback = '';
+                    item.newObservacao = '';
+                }
+                
+                acc[orderId].push(item);
+                return acc;
+            }, {}); 
+            
+            groupedOrdersCache = groupedByOrder;
+
+            feedbackList.innerHTML = ''; 
+            Object.keys(groupedOrdersCache).forEach(orderId => {
+                const products = groupedOrdersCache[orderId];
+                // MUDANÇA: Passa os dados salvos para o card
+                const orderCard = createOrderCard(orderId, products);
+                feedbackList.appendChild(orderCard);
+            });
+
+            // MUDANÇA: Verifica se tudo já está salvo no primeiro carregamento
+            checkAllItemsDone();
+        }
+        
+        function createOrderCard(orderId, products) {
+            const card = document.createElement('div');
+            card.className = "bg-white rounded-xl shadow-md hover:shadow-lg border border-slate-200 overflow-hidden transition-all duration-300";
+            
+            const productListId = `products-${orderId}-${Math.random().toString(36).substring(2, 9)}`;
+            const iconId = `icon-${productListId}`;
+            
+            // MUDANÇA: Contagem de pendentes com base nos dados salvos
+            const pendingCount = products.filter(p => !p.isSaved).length;
+
+            card.innerHTML = `
+                <div class="p-5 md:p-6 cursor-pointer hover:bg-slate-50" data-target-list="${productListId}">
+                    <div class="flex justify-between items-center">
+                        <h3 class="text-xl md:text-2xl font-bold text-slate-800">Pedido: ${orderId}</h3>
+                        <div class="flex items-center space-x-3">
+                            <span id="${productListId}-badge" class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium">
+                                <!-- O status será preenchido abaixo -->
+                            </span>
+                            <svg id="${iconId}" class="w-6 h-6 text-slate-500 transition-transform duration-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                            </svg>
+                        </div>
+                    </div>
+                </div>
+                <div id="${productListId}" class="hidden border-t border-slate-200 divide-y divide-slate-100">
+                    <!-- Os produtos serão injetados aqui -->
+                </div>
+            `;
+
+            const productListEl = card.querySelector(`#${productListId}`);
+            products.forEach(item => {
+                const productRow = createProductRow(item, orderId, productListId);
+                productListEl.appendChild(productRow);
+            });
+
+            // MUDANÇA: Atualiza o emblema após criar o card
+            updateOrderBadge(orderId, `${productListId}-badge`);
+
+            card.querySelector(`[data-target-list]`).addEventListener('click', (e) => {
+                document.getElementById(productListId).classList.toggle('hidden');
+                document.getElementById(iconId).classList.toggle('rotate-180'); 
+            });
+
+            return card;
+        }
+
+
+        function createProductRow(item, orderId, productListId) {
+            const row = document.createElement('div');
+            const uniqueId = `item-${Math.random().toString(36).substring(2, 9)}`;
+            const rowId = `row-${uniqueId}`;
+            const selectId = `select-${uniqueId}`;
+            const textareaId = `textarea-${uniqueId}`;
+            
+            row.className = "p-5 md:p-6 feedback-row";
+            row.id = rowId;
+            // MUDANÇA: Verifica se o item já vem salvo
+            if (item.isSaved) {
+                row.classList.add('row-saved');
+            }
+
+            const optionsHTML = generateFeedbackOptionsHTML();
+            const productId = item.Produto; 
+
+            row.innerHTML = `
+                <div>
+                    <h4 class="text-lg font-semibold text-gray-900">${item.Descrição || 'Item sem descrição'}</h4>
+                    <div class="flex flex-wrap gap-x-6 gap-y-2 text-sm text-gray-500 mt-2">
+                        <p>Produto: <span class="font-medium text-gray-700">${item.Produto || 'N/A'}</span></p>
+                        <p>Nota Fiscal: <span class="font-medium text-gray-700">${item["Nota Fiscal"] || 'N/A'}</span></p>
+                        <p>Emissão NF: <span class="font-medium text-gray-700">${item["Emissão NF"] || 'N/A'}</span></p>
+                    </div>
+                </div>
+                
+                <div class="grid md:grid-cols-2 gap-4 mt-4">
+                    <div>
+                        <label for="${selectId}" class="block text-sm font-medium text-gray-700">Seu Feedback:</label>
+                        <select id="${selectId}" class="mt-1 block w-full p-3 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-base disabled:bg-slate-100 disabled:text-slate-500" ${item.isSaved ? 'disabled' : ''}>
+                            ${optionsHTML}
+                        </select>
+                    </div>
+                    <div>
+                        <label for="${textareaId}" class="block text-sm font-medium text-gray-700">Observação:</label>
+                        <textarea id="${textareaId}" rows="3" class="mt-1 block w-full p-3 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-base disabled:bg-slate-100 disabled:text-slate-500" 
+                                  placeholder="Por favor, detalhe o motivo do feedback." ${item.isSaved ? 'disabled' : ''}>${item.isSaved ? item.newObservacao : ''}</textarea>
+                    </div>
+                </div>
+                <div class="text-right mt-4">
+                    <button data-row-id="${rowId}" 
+                            data-select-id="${selectId}" 
+                            data-textarea-id="${textareaId}" 
+                            data-order-id="${orderId}"
+                            data-product-id="${productId}"
+                            data-badge-id="${productListId}-badge"
+                            class="save-button w-full md:w-auto inline-flex justify-center py-2 px-5 border border-transparent shadow-sm text-sm font-medium rounded-md text-white transition-colors duration-200 ${item.isSaved ? 'bg-yellow-600 hover:bg-yellow-700 cursor-not-allowed' : 'bg-blue-700 hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500'}">
+                        ${item.isSaved ? 'Editar' : 'Salvar Feedback'}
+                    </button>
+                </div>
+            `;
+            
+            // MUDANÇA: Pré-seleciona o feedback se ele já foi salvo
+            if(item.isSaved) {
+                const select = row.querySelector(`#${selectId}`);
+                if (select) {
+                    select.value = item.newFeedback;
+                }
+            }
+            
+            row.querySelector('.save-button').addEventListener('click', handleSaveFeedback);
+            return row;
+        }
+
+        // MUDANÇA: Função agora é async e salva/deleta do DB
+        async function handleSaveFeedback(event) {
+            const button = event.target;
+            
+            if (!isAuthReady) {
+                showToast("Erro: Não foi possível salvar. Verifique sua conexão.");
+                return;
+            }
+
+            const { rowId, selectId, textareaId, orderId, productId, badgeId } = button.dataset;
+            
+            const row = document.getElementById(rowId), 
+                  select = document.getElementById(selectId), 
+                  textarea = document.getElementById(textareaId);
+            
+            if (!row || !select || !textarea) {
+                showToast("Erro: Não foi possível encontrar os elementos da linha.");
+                return;
+            }
+
+            const item = groupedOrdersCache[orderId]?.find(p => p.Produto == productId);
+            if (!item) {
+                showToast("Erro: Não foi possível encontrar os dados do item no cache.");
+                return;
+            }
+
+            // MUDANÇA: Define a referência do documento no DB
+            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'client_feedbacks', `${orderId}-${productId}`);
+
+            // Modo "Editar"
+            if (item.isSaved) { 
+                try {
+                    // MUDANÇA: Deleta o feedback do DB para reativar
+                    await deleteDoc(docRef);
+
+                    item.isSaved = false;
+                    select.disabled = false;
+                    textarea.disabled = false;
+                    
+                    button.textContent = "Salvar Feedback";
+                    button.classList.remove('bg-yellow-600', 'hover:bg-yellow-700', 'cursor-not-allowed');
+                    button.classList.add('bg-blue-700', 'hover:bg-blue-800', 'focus:outline-none', 'focus:ring-2', 'focus:ring-offset-2', 'focus:ring-blue-500');
+                    row.classList.remove('row-saved');
+                    
+                    checkAllItemsDone(); 
+                    updateOrderBadge(orderId, badgeId);
+                } catch(error) {
+                    console.error("Erro ao deletar:", error);
+                    showToast("Erro ao tentar editar. Tente novamente.");
+                }
+                return;
+            }
+
+            // --- Continua para o modo "Salvar" ---
+            const newFeedback = select.value;
+            const observacao = textarea.value.trim();
+
+            let hasError = false;
+            // Validação
+            if (newFeedback.toUpperCase() === DEFAULT_FEEDBACK_FILTER) {
+                showToast("Por favor, selecione um feedback válido.");
+                select.focus();
+                select.classList.add('border-red-500', 'ring-red-500');
+                hasError = true;
+            } else {
+                 select.classList.remove('border-red-500', 'ring-red-500');
+            }
+            if (observacao === "") {
+                showToast("Por favor, preencha o campo de observação.");
+                if (!hasError) textarea.focus(); 
+                textarea.classList.add('border-red-500', 'ring-red-500');
+                hasError = true;
+            } else {
+                 textarea.classList.remove('border-red-500', 'ring-red-500');
+            }
+            if (hasError) return;
+
+            // MUDANÇA: Salva os dados no DB
+            const dataToSave = {
+                orderId: orderId,
+                productId: productId,
+                newFeedback: newFeedback,
+                newObservacao: observacao,
+                savedAt: new Date() // Adiciona um carimbo de data/hora
+            };
+            
+            try {
+                await setDoc(docRef, dataToSave);
+
+                // Atualiza o cache local
+                item.isSaved = true;
+                item.newFeedback = newFeedback;
+                item.newObservacao = observacao;
+
+                // Atualiza a UI
+                select.disabled = true;
+                textarea.disabled = true;
+                button.textContent = "Editar";
+                button.classList.remove('bg-blue-700', 'hover:bg-blue-800', 'focus:outline-none', 'focus:ring-2', 'focus:ring-offset-2', 'focus:ring-blue-500');
+                button.classList.add('bg-yellow-600', 'hover:bg-yellow-700', 'cursor-not-allowed');
+                row.classList.add('row-saved');
+
+                checkAllItemsDone();
+                updateOrderBadge(orderId, badgeId);
+
+            } catch (error) {
+                console.error("Erro ao salvar:", error);
+                showToast("Erro ao salvar o feedback. Tente novamente.");
+            }
+        }
+
+        function checkAllItemsDone() {
+            const allDoneMessage = document.getElementById('all-done-message');
+            if (!allDoneMessage) return;
+
+            let allDone = true;
+            let totalItems = 0;
+
+            Object.values(groupedOrdersCache).flat().forEach(item => {
+                totalItems++;
+                if (!item.isSaved) {
+                    allDone = false;
+                }
+            });
+
+            if (totalItems > 0 && allDone) {
+                allDoneMessage.classList.remove('hidden');
+            } else {
+                allDoneMessage.classList.add('hidden');
+                document.getElementById('summary-area').classList.add('hidden');
+            }
+        }
+
+        function updateOrderBadge(orderId, badgeId) {
+            const badge = document.getElementById(badgeId);
+            if (!badge || !groupedOrdersCache[orderId]) return;
+
+            const products = groupedOrdersCache[orderId];
+            const pendingCount = products.filter(p => !p.isSaved).length;
+
+            if (pendingCount === 0) {
+                badge.textContent = "Concluído";
+                badge.classList.remove('bg-blue-100', 'text-blue-800');
+                badge.classList.add('bg-green-100', 'text-green-800');
+            } else {
+                badge.innerHTML = `${pendingCount} ${pendingCount > 1 ? 'produtos pendentes' : 'produto pendente'}`;
+                badge.classList.remove('bg-green-100', 'text-green-800');
+                badge.classList.add('bg-blue-100', 'text-blue-800');
+            }
+        }
+
+        // MUDANÇA: Função agora é async e lê do DB
+        async function handleGenerateSummary() {
+            const summaryArea = document.getElementById('summary-area');
+            const summaryText = document.getElementById('summaryText');
+            if (!summaryArea || !summaryText) return;
+
+            // MUDANÇA: Busca os dados mais recentes do DB para o resumo
+            const savedFeedbacks = await fetchExistingFeedbacks();
+            if (savedFeedbacks.size === 0) {
+                showToast("Nenhum feedback foi salvo para gerar o resumo.");
+                return;
+            }
+
+            let summary = `RESUMO DOS FEEDBACKS - ${TARGET_CLIENT_NAME}\n`;
+            summary += `Data: ${new Date().toLocaleDateString('pt-BR')}\n`;
+            summary += "===================================================\n\n";
+
+            // Itera pelo cache de *layout* (groupedOrdersCache) para manter a ordem
+            Object.keys(groupedOrdersCache).sort().forEach(orderId => {
+                const products = groupedOrdersCache[orderId];
+                
+                // Filtra apenas os produtos deste pedido que estão no DB
+                const savedProductsInOrder = products.filter(item => savedFeedbacks.has(`${orderId}-${item.Produto}`));
+                
+                if (savedProductsInOrder.length > 0) {
+                    summary += `--- PEDIDO: ${orderId} ---\n\n`;
+                    
+                    savedProductsInOrder.forEach(item => {
+                        // Pega os dados do DB (não do cache, para garantir)
+                        const savedData = savedFeedbacks.get(`${orderId}-${item.Produto}`);
+                        
+                        summary += `Produto: ${item.Produto} (${item.Descrição})\n`;
+                        summary += `   NF: ${item["Nota Fiscal"] || 'N/A'} (Emissão: ${item["Emissão NF"] || 'N/A'})\n`;
+                        summary += `   > Feedback: ${savedData.newFeedback}\n`;
+                        summary += `   > Observação: ${savedData.newObservacao}\n\n`;
+                    });
+                }
+            });
+            
+            summary += "===================================================\n";
+            summary += "Fim do Resumo.";
+
+            summaryText.value = summary;
+            summaryArea.classList.remove('hidden');
+            
+            summaryText.focus();
+            summaryText.select();
+            showToast("Resumo gerado! Por favor, copie o texto.", 'success');
+        }
+
+    </script>
+</head>
+<body class="antialiased">
+
+    <!-- Cabeçalho Principal -->
+    <header class="bg-gradient-to-r from-blue-800 to-blue-700 text-white shadow-lg">
+        <div class="container max-w-5xl mx-auto px-6 py-6">
+            <h1 class="text-3xl font-bold">Seja Bem Vindo ao Painel de Feedbacks</h1>
+            <p class="text-lg opacity-90">Doremus / MOVI Ingredientes</p>
+        </div>
+    </header>
+
+    <main class="container max-w-5xl mx-auto p-6 mt-8">
+        
+        <!-- Bloco de Orientações (Simplificado para o cliente) -->
+        <section class="bg-blue-50 border border-blue-200 text-blue-800 p-5 rounded-xl shadow-sm mb-8">
+            <h2 class="text-xl font-semibold mb-2 text-blue-900">Instruções</h2>
+            <p class="text-blue-700">Para registrar seu feedback, por favor, siga os passos abaixo:</p>
+            <ul class="list-decimal list-inside mt-2 space-y-1">
+                <li>Os pedidos pendentes estão listados abaixo. Clique em um pedido para expandir e ver os produtos.</li>
+                <li>Selecione o feedback e preencha a observação obrigatória para cada produto.</li>
+                <li>Clique em "Salvar Feedback". O botão ficará amarelo e mudará para "Editar" quando salvo.</li>
+                <li>Após salvar todos os itens, uma mensagem de conclusão aparecerá no final da página.</li>
+            </ul>
+        </section>
+        
+        <!-- Passo 1: Colar os Dados (Esta seção é para VOCÊ usar, ela sumirá para o cliente) -->
+        <section id="pasteSection" class="bg-white p-6 rounded-xl shadow-lg mb-8 border border-gray-200">
+            <label for="pasteDataTextarea" class="block text-xl font-semibold text-gray-700 mb-4">Cole os Dados da Planilha</label>
+            <textarea id="pasteDataTextarea" rows="10" 
+                      class="block w-full text-sm text-gray-900 border border-gray-300 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="Copie os dados da sua planilha (incluindo o cabeçalho completo) e cole aqui."></textarea>
+            <button id="processPasteButton" 
+                    class="mt-4 w-full bg-blue-700 text-white py-3 px-5 rounded-lg font-semibold hover:bg-blue-800 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transform hover:-translate-y-0.5 shadow-md hover:shadow-lg">
+                Processar Dados Colados
+            </button>
+            <p id="loadingMessage" class="text-gray-500 text-sm mt-4 hidden">Processando dados...</p>
+        </section>
+
+        <!-- Layout de Lista/Acordeão -->
+        <section id="feedback-list" class="space-y-5">
+            <!-- Mensagem inicial -->
+            <div id="initial-message" class="bg-white p-10 rounded-xl shadow-lg text-center text-gray-500 border border-gray-200">
+                <p class="text-lg">Por favor, cole os dados do relatório na área acima para ver as amostras pendentes.</p>
+            </div>
+            <!-- Os cards de PEDIDO serão injetados aqui pelo JavaScript -->
+        </section>
+        
+        <!-- Mensagem de "Nenhum Item" (escondida por padrão) -->
+        <section id="no-items-message" class="hidden bg-white p-10 rounded-xl shadow-lg text-center text-gray-600 border border-gray-200">
+            <p class="text-lg font-semibold">Nenhuma amostra pendente de feedback encontrada.</p>
+            <p class="mt-2">Os dados foram carregados, mas não há itens para "PERIGE SERVICOS COMERCIAIS LTDA" que exijam feedback.</p>
+        </section>
+
+        <!-- MUDANÇA: Mensagem de Conclusão (escondida por padrão) -->
+        <section id="all-done-message" class="hidden mt-10 bg-green-50 border border-green-300 text-green-800 p-8 rounded-xl shadow-lg text-center">
+            <h2 class="text-3xl font-bold text-green-700">Não há mais pendências, obrigada pela colaboração!</h2>
+            <p class="mt-4 text-lg">Para finalizar e nos enviar suas respostas, por favor, clique no botão abaixo para gerar um resumo.</p>
+            
+            <!-- MUDANÇA: Botão para Gerar Resumo -->
+            <button id="generateSummaryButton" 
+                    class="mt-6 bg-green-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-green-700 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 shadow-md hover:shadow-lg">
+                Gerar Resumo para Envio
+            </button>
+            
+            <!-- MUDANÇA: Área do Resumo (escondida por padrão) -->
+            <div id="summary-area" class="hidden mt-6 text-left">
+                <label for="summaryText" class="block text-sm font-medium text-gray-700">Por favor, copie todo o texto abaixo e nos envie por e-mail:</label>
+                <textarea id="summaryText" rows="15" readonly 
+                          class="mt-2 block w-full text-sm text-gray-900 border border-gray-300 rounded-lg p-3 bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Toast de Notificação (invisível por padrão) -->
+    <div id="toast-notification" class="fixed top-5 right-5 bg-red-600 text-white px-6 py-3 rounded-lg shadow-xl opacity-0 transition-opacity duration-300 z-50">
+        <span id="toast-message"></span>
+    </div>
+
+</body>
+</html>
